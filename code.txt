@@ -1,0 +1,197 @@
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+
+# -------------------------------------------------------------
+# НАСТРОЙКИ
+# -------------------------------------------------------------
+BOT_TOKEN = "8960607544:AAFLueXPI7xrX0SI0vOQJPu8NaWIn6f2V8Q"
+ADMIN_KEY = "nickisnick"
+
+# Хранилище для контента погоды (поддерживает text, photo, voice)
+custom_weather = {
+    "tomorrow": {"type": "text", "content": "🌤 Погода на завтра еще не задана администратором.", "caption": None},
+    "three_days": {"type": "text", "content": "📅 Прогноз на 3 дня еще не задан администратором.", "caption": None},
+    "snow": {"type": "text", "content": "❄️ Информация о снеге еще не задана администратором.", "caption": None}
+}
+
+# Список ID пользователей с правами администратора
+admins = set()
+
+# -------------------------------------------------------------
+# FSM (Состояния) для ввода админ-команд
+# -------------------------------------------------------------
+class AdminStates(StatesGroup):
+    waiting_for_key = State()
+    waiting_for_custom_tomorrow = State()
+    waiting_for_custom_three_days = State()
+    waiting_for_custom_snow = State()
+
+# -------------------------------------------------------------
+# КЛАВИАТУРЫ
+# -------------------------------------------------------------
+def get_main_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🌤 Погода на завтра")
+    builder.button(text="📅 Погода на 3 дня")
+    builder.button(text="❄️ Когда снег?")
+    builder.adjust(2, 1)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_admin_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Отправить погоду на завтра (текст/фото/голосовое)", callback_data="edit_tomorrow")
+    builder.button(text="✏️ Отправить погоду на 3 дня (текст/фото/голосовое)", callback_data="edit_three_days")
+    builder.button(text="✏️ Отправить про снег (текст/фото/голосовое)", callback_data="edit_snow")
+    builder.adjust(1)
+    return builder.as_markup()
+
+# -------------------------------------------------------------
+# ИНИЦИАЛИЗАЦИЯ БОТА
+# -------------------------------------------------------------
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# Команда /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "👋 Привет! Я бот погоды в Новополоцке.\n"
+        "Выберите нужное действие на клавиатуре снизу:",
+        reply_markup=get_main_keyboard()
+    )
+
+# Команда /key для получения доступа к админке
+@dp.message(Command("key"))
+async def cmd_key(message: types.Message, state: FSMContext):
+    await message.answer("🔑 Введите секретный ключ доступа:")
+    await state.set_state(AdminStates.waiting_for_key)
+
+# Проверка секретного ключа
+@dp.message(AdminStates.waiting_for_key)
+async def check_key(message: types.Message, state: FSMContext):
+    if message.text == ADMIN_KEY:
+        admins.add(message.from_user.id)
+        await state.clear()
+        await message.answer(
+            "✅ Доступ разрешен! Вы вошли в админ-панель.\n"
+            "Выберите блок для заполнения:",
+            reply_markup=get_admin_keyboard()
+        )
+    else:
+        await state.clear()
+        await message.answer("❌ Неверный ключ доступа!")
+
+# --- Универсальная функция отправки контента пользователям ---
+async def send_weather_content(message: types.Message, weather_data: dict):
+    w_type = weather_data["type"]
+    content = weather_data["content"]
+    caption = weather_data.get("caption")
+
+    if w_type == "text":
+        await message.answer(content)
+    elif w_type == "photo":
+        await message.answer_photo(photo=content, caption=caption)
+    elif w_type == "voice":
+        await message.answer_voice(voice=content, caption=caption)
+
+# --- Пользовательские запросы ---
+
+@dp.message(F.text == "🌤 Погода на завтра")
+async def show_tomorrow(message: types.Message):
+    await send_weather_content(message, custom_weather["tomorrow"])
+
+@dp.message(F.text == "📅 Погода на 3 дня")
+async def show_three_days(message: types.Message):
+    await send_weather_content(message, custom_weather["three_days"])
+
+@dp.message(F.text == "❄️ Когда снег?")
+async def show_snow(message: types.Message):
+    await send_weather_content(message, custom_weather["snow"])
+
+# --- Логика Админ-панели (Прием текста, фото или голосовых) ---
+
+@dp.callback_query(F.data == "edit_tomorrow")
+async def process_edit_tomorrow(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in admins:
+        await callback.answer("У вас нет прав!", show_alert=True)
+        return
+    await callback.message.answer("✏️ Отправьте **текст с эмодзи**, **картинку** (можно с подписью) или **голосовое сообщение** на завтра:")
+    await state.set_state(AdminStates.waiting_for_custom_tomorrow)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_custom_tomorrow)
+async def set_custom_tomorrow(message: types.Message, state: FSMContext):
+    if message.photo:
+        custom_weather["tomorrow"] = {"type": "photo", "content": message.photo[-1].file_id, "caption": message.caption}
+    elif message.voice:
+        custom_weather["tomorrow"] = {"type": "voice", "content": message.voice.file_id, "caption": message.caption}
+    elif message.text:
+        custom_weather["tomorrow"] = {"type": "text", "content": message.text, "caption": None}
+    else:
+        await message.answer("❌ Поддерживаются только текст, фото или голосовые сообщения!")
+        return
+
+    await state.clear()
+    await message.answer("✅ Готово! Погода на завтра обновлена для всех пользователей.")
+
+@dp.callback_query(F.data == "edit_three_days")
+async def process_edit_three_days(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in admins:
+        await callback.answer("У вас нет прав!", show_alert=True)
+        return
+    await callback.message.answer("✏️ Отправьте **текст с эмодзи**, **картинку** или **голосовое сообщение** на 3 дня:")
+    await state.set_state(AdminStates.waiting_for_custom_three_days)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_custom_three_days)
+async def set_custom_three_days(message: types.Message, state: FSMContext):
+    if message.photo:
+        custom_weather["three_days"] = {"type": "photo", "content": message.photo[-1].file_id, "caption": message.caption}
+    elif message.voice:
+        custom_weather["three_days"] = {"type": "voice", "content": message.voice.file_id, "caption": message.caption}
+    elif message.text:
+        custom_weather["three_days"] = {"type": "text", "content": message.text, "caption": None}
+    else:
+        await message.answer("❌ Поддерживаются только текст, фото или голосовые сообщения!")
+        return
+
+    await state.clear()
+    await message.answer("✅ Готово! Погода на 3 дня обновлена для всех пользователей.")
+
+@dp.callback_query(F.data == "edit_snow")
+async def process_edit_snow(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in admins:
+        await callback.answer("У вас нет прав!", show_alert=True)
+        return
+    await callback.message.answer("✏️ Отправьте **текст с эмодзи**, **картинку** или **голосовое сообщение** про снег:")
+    await state.set_state(AdminStates.waiting_for_custom_snow)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_custom_snow)
+async def set_custom_snow(message: types.Message, state: FSMContext):
+    if message.photo:
+        custom_weather["snow"] = {"type": "photo", "content": message.photo[-1].file_id, "caption": message.caption}
+    elif message.voice:
+        custom_weather["snow"] = {"type": "voice", "content": message.voice.file_id, "caption": message.caption}
+    elif message.text:
+        custom_weather["snow"] = {"type": "text", "content": message.text, "caption": None}
+    else:
+        await message.answer("❌ Поддерживаются только текст, фото или голосовые сообщения!")
+        return
+
+    await state.clear()
+    await message.answer("✅ Готово! Информация о снеге обновлена для всех пользователей.")
+
+# Запуск бота
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
